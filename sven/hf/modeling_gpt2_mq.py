@@ -19,8 +19,35 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutputWithPast,
     TokenClassifierOutput,
 )
-from transformers.modeling_utils import PreTrainedModel, SequenceSummary
-from transformers.pytorch_utils import Conv1D, find_pruneable_heads_and_indices, prune_conv1d_layer
+from transformers.modeling_utils import PreTrainedModel
+from transformers.pytorch_utils import Conv1D
+try:
+    from transformers.pytorch_utils import find_pruneable_heads_and_indices, prune_conv1d_layer
+except ImportError:
+    def find_pruneable_heads_and_indices(heads, n_heads, head_size, already_pruned_heads):
+        mask = torch.ones(n_heads, head_size)
+        heads = set(heads) - already_pruned_heads
+        for head in heads:
+            head -= sum(1 if h < head else 0 for h in already_pruned_heads)
+            mask[head] = 0
+        mask = mask.view(-1).contiguous().eq(1)
+        index = torch.arange(len(mask))[mask].long()
+        return heads, index
+
+    def prune_conv1d_layer(layer, index, dim=1):
+        index = index.to(layer.weight.device)
+        W = layer.weight.index_select(dim, index).clone().detach()
+        b = layer.bias[index].clone().detach() if dim == 1 else layer.bias.clone().detach()
+        new_size = list(layer.weight.size())
+        new_size[dim] = len(index)
+        new_layer = Conv1D(new_size[1], new_size[0]).to(layer.weight.device)
+        new_layer.weight.requires_grad = False
+        new_layer.weight.copy_(W.contiguous())
+        new_layer.weight.requires_grad = True
+        new_layer.bias.requires_grad = False
+        new_layer.bias.copy_(b.contiguous())
+        new_layer.bias.requires_grad = True
+        return new_layer
 
 from transformers.utils import (
     ModelOutput,
@@ -30,7 +57,22 @@ from transformers.utils import (
     logging,
     replace_return_docstrings,
 )
-from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
+try:
+    from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
+except ImportError:
+    def get_device_map(n_layers, devices):
+        devices = list(devices)
+        layers_per_device, remainder = divmod(n_layers, len(devices))
+        device_map, layer = {}, 0
+        for i, device in enumerate(devices):
+            for _ in range(layers_per_device + (1 if i < remainder else 0)):
+                device_map[layer] = device
+                layer += 1
+        return device_map
+
+    def assert_device_map(device_map, num_blocks):
+        assert set(device_map.keys()) == set(range(num_blocks)), \
+            f"Device map must cover all {num_blocks} layers, got {sorted(device_map.keys())}"
 from transformers.models.gpt2.modeling_gpt2 import GPT2Model, GPT2Block, GPT2PreTrainedModel, GPT2LMHeadModel
 from .configuration_gpt2_mq import GPT2CustomConfig, MULTI_QUERY, MULTI_HEAD
 

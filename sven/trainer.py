@@ -5,7 +5,8 @@ import torch.nn.functional as F
 import numpy as np
 from collections import OrderedDict
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
-from transformers import AdamW, get_linear_schedule_with_warmup
+from torch.optim import AdamW
+from transformers import get_linear_schedule_with_warmup
 
 from sven.model import save_model, parallelize_model, load_model
 from sven.dataset import PrefixDataset, TextPromptDataset

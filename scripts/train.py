@@ -51,6 +51,8 @@ def get_args():
             args.n_prefix_token = 8
         elif args.pretrain_dir == 'Salesforce/codegen-6B-multi':
             args.n_prefix_token = 12
+        elif args.pretrain_dir == 'mistralai/Mistral-7B-v0.1':
+            args.n_prefix_token = 16
         else:
             assert False
 
@@ -61,6 +63,8 @@ def get_args():
             args.num_train_epochs = 5
         elif args.pretrain_dir == 'Salesforce/codegen-6B-multi':
             args.num_train_epochs = 5
+        elif args.pretrain_dir == 'mistralai/Mistral-7B-v0.1':
+            args.num_train_epochs = 5
         else:
             assert False
 
@@ -70,6 +74,8 @@ def get_args():
         elif args.pretrain_dir == 'Salesforce/codegen-2B-multi':
             args.kl_loss_ratio = 1600
         elif args.pretrain_dir == 'Salesforce/codegen-6B-multi':
+            args.kl_loss_ratio = 2000
+        elif args.pretrain_dir == 'mistralai/Mistral-7B-v0.1':
             args.kl_loss_ratio = 2000
         else:
             assert False

@@ -29,7 +29,22 @@ from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttenti
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import add_code_sample_docstrings, add_start_docstrings, add_start_docstrings_to_model_forward, logging
 from transformers.models.xglm.configuration_xglm import XGLMConfig
-from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
+try:
+    from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
+except ImportError:
+    def get_device_map(n_layers, devices):
+        devices = list(devices)
+        layers_per_device, remainder = divmod(n_layers, len(devices))
+        device_map, layer = {}, 0
+        for i, device in enumerate(devices):
+            for _ in range(layers_per_device + (1 if i < remainder else 0)):
+                device_map[layer] = device
+                layer += 1
+        return device_map
+
+    def assert_device_map(device_map, num_blocks):
+        assert set(device_map.keys()) == set(range(num_blocks)), \
+            f"Device map must cover all {num_blocks} layers, got {sorted(device_map.keys())}"
 
 
 logger = logging.get_logger(__name__)

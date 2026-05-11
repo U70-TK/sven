@@ -1,7 +1,7 @@
 import os
 import torch
 from typing import Optional, Tuple, Union, List
-from transformers import AutoTokenizer, AutoConfig, logging
+from transformers import AutoTokenizer, AutoConfig, logging, MistralForCausalLM
 from transformers.modeling_outputs import CausalLMOutputWithPast, CausalLMOutputWithCrossAttentions
 from sven.hf import CodeGenForCausalLM, XGLMForCausalLM, GPT2LMHeadCustomModel, GPT2CustomConfig
 
@@ -247,6 +247,102 @@ class SantaPrefixLM(GPT2LMHeadCustomModel):
             return_dict,
         )
 
+class MistralPrefixCausalLM(MistralForCausalLM):
+    def __init__(self, config):
+        super().__init__(config)
+
+        # Mistral uses GQA: KV heads (num_key_value_heads=8) != query heads (num_attention_heads=32)
+        self.head_dim = config.hidden_size // config.num_attention_heads
+        self.prefix_params = torch.nn.ParameterList()
+        for _ in range(config.n_control):
+            for _ in range(config.num_hidden_layers):
+                for _ in range(2):  # key, value
+                    param_size = (config.num_key_value_heads, config.n_prefix_token, self.head_dim)
+                    param = torch.nn.Parameter(torch.zeros(param_size, requires_grad=True))
+                    self.prefix_params.append(param)
+        self.dropout = torch.nn.Dropout(config.prefix_dropout)
+
+    def get_past_from_prefix(self, control_ids):
+        from transformers import DynamicCache
+        # Cast to model dtype (bfloat16) to avoid mismatch with frozen weights
+        dtype = self.model.embed_tokens.weight.dtype
+        cache = DynamicCache()
+        for i in range(self.config.num_hidden_layers):
+            key_stack, val_stack = [], []
+            for control_id in control_ids:
+                key_idx = control_id * self.config.num_hidden_layers * 2 + i * 2
+                val_idx = key_idx + 1
+                key_stack.append(self.dropout(self.prefix_params[key_idx]))
+                val_stack.append(self.dropout(self.prefix_params[val_idx]))
+            cache.update(
+                torch.stack(key_stack).to(dtype=dtype),
+                torch.stack(val_stack).to(dtype=dtype),
+                i,
+            )
+        return cache
+
+    def generate(self, input_ids=None, attention_mask=None, **kwargs):
+        # Extend the attention mask by prefix_len here so that _expand_inputs_for_generation
+        # (a tensor-only expander) broadcasts the correct mask to the full batch size.
+        # The DynamicCache prefix is injected in prepare_inputs_for_generation after
+        # expansion, where input_ids already has the correct batch dimension.
+        if 'control_id' in kwargs:
+            prefix_len = self.config.n_prefix_token
+            if attention_mask is not None:
+                prefix_mask = attention_mask.new_ones(attention_mask.shape[0], prefix_len)
+                attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+            else:
+                attention_mask = input_ids.new_ones(input_ids.shape[0], prefix_len + input_ids.shape[1])
+        return super().generate(input_ids, attention_mask=attention_mask, **kwargs)
+
+    def prepare_inputs_for_generation(self, input_ids, past_key_values=None, attention_mask=None, **kwargs):
+        # On the first step, inject the prefix KV cache at the correct batch size.
+        # The attention_mask was already extended by prefix_len in generate(), so only
+        # inject if the mask isn't yet wider than input_ids (handles the no-prefix path).
+        is_first_step = past_key_values is None or past_key_values.get_seq_length() == 0
+        if is_first_step and 'control_id' in kwargs:
+            control_ids = [kwargs['control_id']] * input_ids.shape[0]
+            past_key_values = self.get_past_from_prefix(control_ids)
+            # If generate() didn't pre-extend the mask (e.g. direct call without generate()),
+            # extend it here.
+            prefix_len = past_key_values.get_seq_length()
+            if attention_mask is not None and attention_mask.shape[1] == input_ids.shape[1]:
+                prefix_mask = attention_mask.new_ones(attention_mask.shape[0], prefix_len)
+                attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+            elif attention_mask is None:
+                attention_mask = input_ids.new_ones(input_ids.shape[0], prefix_len + input_ids.shape[1])
+        return super().prepare_inputs_for_generation(
+            input_ids, past_key_values=past_key_values, attention_mask=attention_mask, **kwargs
+        )
+
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values=None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        control_id=None,  # placeholder, unused in forward
+    ):
+        return super().forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            labels=labels,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+
 def model_from_pretrained(lm_path, model_type, config):
     kwargs = dict()
     if lm_path.startswith('Salesforce/codegen-'):
@@ -278,6 +374,15 @@ def model_from_pretrained(lm_path, model_type, config):
             model_class = SantaPrefixLM
         else:
             assert False
+    elif lm_path.startswith('mistralai/'):
+        # Load in bfloat16 to fit 7B weights in GPU memory
+        kwargs['torch_dtype'] = torch.bfloat16
+        if model_type == 'lm':
+            model_class = MistralForCausalLM
+        elif model_type == 'prefix':
+            model_class = MistralPrefixCausalLM
+        else:
+            assert False
     else:
         assert False
 
@@ -295,8 +400,8 @@ def config_from_pretrained(lm_path, path):
         return AutoConfig.from_pretrained(path)
 
 def save_model(model, path, args):
-    if type(model) in (CodeGenPrefixCausalLM, IncoderPrefixLM, SantaPrefixLM):
-        assert args.pretrain_dir.startswith('Salesforce/codegen-') or args.pretrain_dir.startswith('facebook/incoder-') or args.pretrain_dir == 'bigcode/santacoder'
+    if type(model) in (CodeGenPrefixCausalLM, IncoderPrefixLM, SantaPrefixLM, MistralPrefixCausalLM):
+        assert args.pretrain_dir.startswith('Salesforce/codegen-') or args.pretrain_dir.startswith('facebook/incoder-') or args.pretrain_dir == 'bigcode/santacoder' or args.pretrain_dir.startswith('mistralai/')
         config_file = os.path.join(path)
         model.config.save_pretrained(config_file)
         prefix_file = os.path.join(path, 'pytorch_model.bin')
@@ -329,6 +434,11 @@ def load_model(model_type, path, is_training, args):
             lm_config.prefix_dropout = args.dropout
             lm_config.n_control = 2
             model = model_from_pretrained(lm_path, model_type, lm_config)
+            # from_pretrained uses torch.empty for params absent from checkpoint,
+            # leaving garbage/NaN; explicitly zero the prefix params after loading
+            if hasattr(model, 'prefix_params'):
+                for param in model.prefix_params:
+                    torch.nn.init.zeros_(param)
         else:
             lm_path_file = os.path.join(path, 'lm.txt')
             assert os.path.exists(lm_path_file)
@@ -350,7 +460,7 @@ def load_model(model_type, path, is_training, args):
     return tokenizer, model, input_device
 
 def parallelize_model(model, args):
-    if args.n_gpu > 1:
+    if args.n_gpu > 1 and hasattr(model, 'parallelize'):
         model.parallelize()
         input_device = model.transformer.first_device
     else:

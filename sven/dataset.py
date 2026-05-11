@@ -65,7 +65,7 @@ class PrefixDataset(DatasetBase):
             self.dataset.append(data)
 
     def get_tensor(self, src, vul_id, control_id, changes):
-        be = self.tokenizer.encode_plus(src)
+        be = self.tokenizer(src)
         tokens = be.data['input_ids']
         if len(tokens) > self.args.max_num_tokens: return None
 
@@ -102,7 +102,7 @@ class TextPromptDataset(DatasetBase):
             self.dataset.append(data)
 
     def get_tensor(self, src, control, changes):
-        be = self.tokenizer.encode_plus(src)
+        be = self.tokenizer(src)
         tokens = be.data['input_ids']
 
         if changes is None:

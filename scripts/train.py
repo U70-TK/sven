@@ -53,32 +53,45 @@ def get_args():
             args.n_prefix_token = 12
         elif args.pretrain_dir == 'mistralai/Mistral-7B-v0.1':
             args.n_prefix_token = 16
+        elif args.pretrain_dir in ('deepseek-ai/deepseek-coder-1.3b-instruct', 'microsoft/phi-2',
+                                   'Qwen/Qwen2.5-Coder-3B-Instruct', 'Qwen/Qwen3-4B'):
+            args.n_prefix_token = 12
+        elif args.pretrain_dir in ('codellama/CodeLlama-7b-hf',
+                                   'deepseek-ai/DeepSeek-Coder-6.7B-instruct',
+                                   'meta-llama/Llama-2-7b-chat-hf',
+                                   'Qwen/Qwen2.5-Coder-7B-Instruct', 'Qwen/Qwen3-8B'):
+            args.n_prefix_token = 16
         else:
-            assert False
+            assert False, f"Unknown pretrain_dir: {args.pretrain_dir}. Pass --n_prefix_token explicitly."
 
     if args.num_train_epochs is None:
         if args.pretrain_dir == 'Salesforce/codegen-350M-multi':
             args.num_train_epochs = 8
-        elif args.pretrain_dir == 'Salesforce/codegen-2B-multi':
-            args.num_train_epochs = 5
-        elif args.pretrain_dir == 'Salesforce/codegen-6B-multi':
-            args.num_train_epochs = 5
-        elif args.pretrain_dir == 'mistralai/Mistral-7B-v0.1':
+        elif args.pretrain_dir in ('Salesforce/codegen-2B-multi', 'Salesforce/codegen-6B-multi',
+                                   'mistralai/Mistral-7B-v0.1',
+                                   'codellama/CodeLlama-7b-hf',
+                                   'deepseek-ai/DeepSeek-Coder-6.7B-instruct',
+                                   'deepseek-ai/deepseek-coder-1.3b-instruct',
+                                   'meta-llama/Llama-2-7b-chat-hf', 'microsoft/phi-2',
+                                   'Qwen/Qwen2.5-Coder-3B-Instruct', 'Qwen/Qwen2.5-Coder-7B-Instruct',
+                                   'Qwen/Qwen3-4B', 'Qwen/Qwen3-8B'):
             args.num_train_epochs = 5
         else:
-            assert False
+            assert False, f"Unknown pretrain_dir: {args.pretrain_dir}. Pass --num_train_epochs explicitly."
 
     if args.kl_loss_ratio is None:
-        if args.pretrain_dir == 'Salesforce/codegen-350M-multi':
+        if args.pretrain_dir in ('Salesforce/codegen-350M-multi', 'Salesforce/codegen-2B-multi',
+                                 'deepseek-ai/deepseek-coder-1.3b-instruct', 'microsoft/phi-2'):
             args.kl_loss_ratio = 1600
-        elif args.pretrain_dir == 'Salesforce/codegen-2B-multi':
-            args.kl_loss_ratio = 1600
-        elif args.pretrain_dir == 'Salesforce/codegen-6B-multi':
-            args.kl_loss_ratio = 2000
-        elif args.pretrain_dir == 'mistralai/Mistral-7B-v0.1':
+        elif args.pretrain_dir in ('Salesforce/codegen-6B-multi', 'mistralai/Mistral-7B-v0.1',
+                                   'codellama/CodeLlama-7b-hf',
+                                   'deepseek-ai/DeepSeek-Coder-6.7B-instruct',
+                                   'meta-llama/Llama-2-7b-chat-hf',
+                                   'Qwen/Qwen2.5-Coder-3B-Instruct', 'Qwen/Qwen2.5-Coder-7B-Instruct',
+                                   'Qwen/Qwen3-4B', 'Qwen/Qwen3-8B'):
             args.kl_loss_ratio = 2000
         else:
-            assert False
+            assert False, f"Unknown pretrain_dir: {args.pretrain_dir}. Pass --kl_loss_ratio explicitly."
 
     if args.model_type == 'prefix':
         if args.learning_rate is None:

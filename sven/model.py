@@ -1,7 +1,7 @@
 import os
 import torch
 from typing import Optional, Tuple, Union, List
-from transformers import AutoTokenizer, AutoConfig, logging, MistralForCausalLM
+from transformers import AutoTokenizer, AutoConfig, logging, GemmaForCausalLM, LlamaForCausalLM, MistralForCausalLM, PhiForCausalLM, Qwen2ForCausalLM, Qwen3ForCausalLM
 from transformers.modeling_outputs import CausalLMOutputWithPast, CausalLMOutputWithCrossAttentions
 from sven.hf import CodeGenForCausalLM, XGLMForCausalLM, GPT2LMHeadCustomModel, GPT2CustomConfig
 
@@ -343,6 +343,436 @@ class MistralPrefixCausalLM(MistralForCausalLM):
         )
 
 
+class GemmaPrefixCausalLM(GemmaForCausalLM):
+    def __init__(self, config):
+        super().__init__(config)
+
+        # Gemma carries an explicit head_dim (256) that is consistent across 2B and 7B.
+        self.head_dim = config.head_dim
+        self.prefix_params = torch.nn.ParameterList()
+        for _ in range(config.n_control):
+            for _ in range(config.num_hidden_layers):
+                for _ in range(2):  # key, value
+                    param_size = (config.num_key_value_heads, config.n_prefix_token, self.head_dim)
+                    param = torch.nn.Parameter(torch.zeros(param_size, requires_grad=True))
+                    self.prefix_params.append(param)
+        self.dropout = torch.nn.Dropout(config.prefix_dropout)
+
+    def get_past_from_prefix(self, control_ids):
+        from transformers import DynamicCache
+        dtype = self.model.embed_tokens.weight.dtype
+        cache = DynamicCache()
+        for i in range(self.config.num_hidden_layers):
+            key_stack, val_stack = [], []
+            for control_id in control_ids:
+                key_idx = control_id * self.config.num_hidden_layers * 2 + i * 2
+                val_idx = key_idx + 1
+                key_stack.append(self.dropout(self.prefix_params[key_idx]))
+                val_stack.append(self.dropout(self.prefix_params[val_idx]))
+            cache.update(
+                torch.stack(key_stack).to(dtype=dtype),
+                torch.stack(val_stack).to(dtype=dtype),
+                i,
+            )
+        return cache
+
+    def generate(self, input_ids=None, attention_mask=None, **kwargs):
+        if 'control_id' in kwargs:
+            prefix_len = self.config.n_prefix_token
+            if attention_mask is not None:
+                prefix_mask = attention_mask.new_ones(attention_mask.shape[0], prefix_len)
+                attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+            else:
+                attention_mask = input_ids.new_ones(input_ids.shape[0], prefix_len + input_ids.shape[1])
+        return super().generate(input_ids, attention_mask=attention_mask, **kwargs)
+
+    def prepare_inputs_for_generation(self, input_ids, past_key_values=None, attention_mask=None, **kwargs):
+        is_first_step = past_key_values is None or past_key_values.get_seq_length() == 0
+        if is_first_step and 'control_id' in kwargs:
+            control_ids = [kwargs['control_id']] * input_ids.shape[0]
+            past_key_values = self.get_past_from_prefix(control_ids)
+            prefix_len = past_key_values.get_seq_length()
+            if attention_mask is not None and attention_mask.shape[1] == input_ids.shape[1]:
+                prefix_mask = attention_mask.new_ones(attention_mask.shape[0], prefix_len)
+                attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+            elif attention_mask is None:
+                attention_mask = input_ids.new_ones(input_ids.shape[0], prefix_len + input_ids.shape[1])
+        return super().prepare_inputs_for_generation(
+            input_ids, past_key_values=past_key_values, attention_mask=attention_mask, **kwargs
+        )
+
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values=None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        control_id=None,  # placeholder, unused in forward
+    ):
+        return super().forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            labels=labels,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+
+class LlamaPrefixCausalLM(LlamaForCausalLM):
+    def __init__(self, config):
+        super().__init__(config)
+
+        # LlamaConfig carries an explicit head_dim in recent versions; fall back to formula.
+        self.head_dim = getattr(config, 'head_dim', config.hidden_size // config.num_attention_heads)
+        self.prefix_params = torch.nn.ParameterList()
+        for _ in range(config.n_control):
+            for _ in range(config.num_hidden_layers):
+                for _ in range(2):  # key, value
+                    param_size = (config.num_key_value_heads, config.n_prefix_token, self.head_dim)
+                    param = torch.nn.Parameter(torch.zeros(param_size, requires_grad=True))
+                    self.prefix_params.append(param)
+        self.dropout = torch.nn.Dropout(config.prefix_dropout)
+
+    def get_past_from_prefix(self, control_ids):
+        from transformers import DynamicCache
+        dtype = self.model.embed_tokens.weight.dtype
+        cache = DynamicCache()
+        for i in range(self.config.num_hidden_layers):
+            key_stack, val_stack = [], []
+            for control_id in control_ids:
+                key_idx = control_id * self.config.num_hidden_layers * 2 + i * 2
+                val_idx = key_idx + 1
+                key_stack.append(self.dropout(self.prefix_params[key_idx]))
+                val_stack.append(self.dropout(self.prefix_params[val_idx]))
+            cache.update(
+                torch.stack(key_stack).to(dtype=dtype),
+                torch.stack(val_stack).to(dtype=dtype),
+                i,
+            )
+        return cache
+
+    def generate(self, input_ids=None, attention_mask=None, **kwargs):
+        if 'control_id' in kwargs:
+            prefix_len = self.config.n_prefix_token
+            if attention_mask is not None:
+                prefix_mask = attention_mask.new_ones(attention_mask.shape[0], prefix_len)
+                attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+            else:
+                attention_mask = input_ids.new_ones(input_ids.shape[0], prefix_len + input_ids.shape[1])
+        return super().generate(input_ids, attention_mask=attention_mask, **kwargs)
+
+    def prepare_inputs_for_generation(self, input_ids, past_key_values=None, attention_mask=None, **kwargs):
+        is_first_step = past_key_values is None or past_key_values.get_seq_length() == 0
+        if is_first_step and 'control_id' in kwargs:
+            control_ids = [kwargs['control_id']] * input_ids.shape[0]
+            past_key_values = self.get_past_from_prefix(control_ids)
+            prefix_len = past_key_values.get_seq_length()
+            if attention_mask is not None and attention_mask.shape[1] == input_ids.shape[1]:
+                prefix_mask = attention_mask.new_ones(attention_mask.shape[0], prefix_len)
+                attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+            elif attention_mask is None:
+                attention_mask = input_ids.new_ones(input_ids.shape[0], prefix_len + input_ids.shape[1])
+        return super().prepare_inputs_for_generation(
+            input_ids, past_key_values=past_key_values, attention_mask=attention_mask, **kwargs
+        )
+
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values=None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        control_id=None,  # placeholder, unused in forward
+    ):
+        return super().forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            labels=labels,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+
+class PhiPrefixCausalLM(PhiForCausalLM):
+    def __init__(self, config):
+        super().__init__(config)
+
+        # PhiConfig has no explicit head_dim field; formula is correct (2560//32 = 80).
+        self.head_dim = config.hidden_size // config.num_attention_heads
+        self.prefix_params = torch.nn.ParameterList()
+        for _ in range(config.n_control):
+            for _ in range(config.num_hidden_layers):
+                for _ in range(2):  # key, value
+                    param_size = (config.num_key_value_heads, config.n_prefix_token, self.head_dim)
+                    param = torch.nn.Parameter(torch.zeros(param_size, requires_grad=True))
+                    self.prefix_params.append(param)
+        self.dropout = torch.nn.Dropout(config.prefix_dropout)
+
+    def get_past_from_prefix(self, control_ids):
+        from transformers import DynamicCache
+        dtype = self.model.embed_tokens.weight.dtype
+        cache = DynamicCache()
+        for i in range(self.config.num_hidden_layers):
+            key_stack, val_stack = [], []
+            for control_id in control_ids:
+                key_idx = control_id * self.config.num_hidden_layers * 2 + i * 2
+                val_idx = key_idx + 1
+                key_stack.append(self.dropout(self.prefix_params[key_idx]))
+                val_stack.append(self.dropout(self.prefix_params[val_idx]))
+            cache.update(
+                torch.stack(key_stack).to(dtype=dtype),
+                torch.stack(val_stack).to(dtype=dtype),
+                i,
+            )
+        return cache
+
+    def generate(self, input_ids=None, attention_mask=None, **kwargs):
+        if 'control_id' in kwargs:
+            prefix_len = self.config.n_prefix_token
+            if attention_mask is not None:
+                prefix_mask = attention_mask.new_ones(attention_mask.shape[0], prefix_len)
+                attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+            else:
+                attention_mask = input_ids.new_ones(input_ids.shape[0], prefix_len + input_ids.shape[1])
+        return super().generate(input_ids, attention_mask=attention_mask, **kwargs)
+
+    def prepare_inputs_for_generation(self, input_ids, past_key_values=None, attention_mask=None, **kwargs):
+        is_first_step = past_key_values is None or past_key_values.get_seq_length() == 0
+        if is_first_step and 'control_id' in kwargs:
+            control_ids = [kwargs['control_id']] * input_ids.shape[0]
+            past_key_values = self.get_past_from_prefix(control_ids)
+            prefix_len = past_key_values.get_seq_length()
+            if attention_mask is not None and attention_mask.shape[1] == input_ids.shape[1]:
+                prefix_mask = attention_mask.new_ones(attention_mask.shape[0], prefix_len)
+                attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+            elif attention_mask is None:
+                attention_mask = input_ids.new_ones(input_ids.shape[0], prefix_len + input_ids.shape[1])
+        return super().prepare_inputs_for_generation(
+            input_ids, past_key_values=past_key_values, attention_mask=attention_mask, **kwargs
+        )
+
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values=None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        control_id=None,  # placeholder, unused in forward
+    ):
+        return super().forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            labels=labels,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+
+class Qwen2PrefixCausalLM(Qwen2ForCausalLM):
+    def __init__(self, config):
+        super().__init__(config)
+
+        self.head_dim = config.hidden_size // config.num_attention_heads
+        self.prefix_params = torch.nn.ParameterList()
+        for _ in range(config.n_control):
+            for _ in range(config.num_hidden_layers):
+                for _ in range(2):  # key, value
+                    param_size = (config.num_key_value_heads, config.n_prefix_token, self.head_dim)
+                    param = torch.nn.Parameter(torch.zeros(param_size, requires_grad=True))
+                    self.prefix_params.append(param)
+        self.dropout = torch.nn.Dropout(config.prefix_dropout)
+
+    def get_past_from_prefix(self, control_ids):
+        from transformers import DynamicCache
+        dtype = self.model.embed_tokens.weight.dtype
+        cache = DynamicCache()
+        for i in range(self.config.num_hidden_layers):
+            key_stack, val_stack = [], []
+            for control_id in control_ids:
+                key_idx = control_id * self.config.num_hidden_layers * 2 + i * 2
+                val_idx = key_idx + 1
+                key_stack.append(self.dropout(self.prefix_params[key_idx]))
+                val_stack.append(self.dropout(self.prefix_params[val_idx]))
+            cache.update(
+                torch.stack(key_stack).to(dtype=dtype),
+                torch.stack(val_stack).to(dtype=dtype),
+                i,
+            )
+        return cache
+
+    def generate(self, input_ids=None, attention_mask=None, **kwargs):
+        if 'control_id' in kwargs:
+            prefix_len = self.config.n_prefix_token
+            if attention_mask is not None:
+                prefix_mask = attention_mask.new_ones(attention_mask.shape[0], prefix_len)
+                attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+            else:
+                attention_mask = input_ids.new_ones(input_ids.shape[0], prefix_len + input_ids.shape[1])
+        return super().generate(input_ids, attention_mask=attention_mask, **kwargs)
+
+    def prepare_inputs_for_generation(self, input_ids, past_key_values=None, attention_mask=None, **kwargs):
+        is_first_step = past_key_values is None or past_key_values.get_seq_length() == 0
+        if is_first_step and 'control_id' in kwargs:
+            control_ids = [kwargs['control_id']] * input_ids.shape[0]
+            past_key_values = self.get_past_from_prefix(control_ids)
+            prefix_len = past_key_values.get_seq_length()
+            if attention_mask is not None and attention_mask.shape[1] == input_ids.shape[1]:
+                prefix_mask = attention_mask.new_ones(attention_mask.shape[0], prefix_len)
+                attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+            elif attention_mask is None:
+                attention_mask = input_ids.new_ones(input_ids.shape[0], prefix_len + input_ids.shape[1])
+        return super().prepare_inputs_for_generation(
+            input_ids, past_key_values=past_key_values, attention_mask=attention_mask, **kwargs
+        )
+
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values=None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        control_id=None,  # placeholder, unused in forward
+    ):
+        return super().forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            labels=labels,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+
+class Qwen3PrefixCausalLM(Qwen3ForCausalLM):
+    def __init__(self, config):
+        super().__init__(config)
+
+        # Qwen3 uses GQA and an explicit head_dim that differs from
+        # hidden_size // num_attention_heads (e.g. 4B: 80 vs 128).
+        self.head_dim = config.head_dim
+        self.prefix_params = torch.nn.ParameterList()
+        for _ in range(config.n_control):
+            for _ in range(config.num_hidden_layers):
+                for _ in range(2):  # key, value
+                    param_size = (config.num_key_value_heads, config.n_prefix_token, self.head_dim)
+                    param = torch.nn.Parameter(torch.zeros(param_size, requires_grad=True))
+                    self.prefix_params.append(param)
+        self.dropout = torch.nn.Dropout(config.prefix_dropout)
+
+    def get_past_from_prefix(self, control_ids):
+        from transformers import DynamicCache
+        dtype = self.model.embed_tokens.weight.dtype
+        cache = DynamicCache()
+        for i in range(self.config.num_hidden_layers):
+            key_stack, val_stack = [], []
+            for control_id in control_ids:
+                key_idx = control_id * self.config.num_hidden_layers * 2 + i * 2
+                val_idx = key_idx + 1
+                key_stack.append(self.dropout(self.prefix_params[key_idx]))
+                val_stack.append(self.dropout(self.prefix_params[val_idx]))
+            cache.update(
+                torch.stack(key_stack).to(dtype=dtype),
+                torch.stack(val_stack).to(dtype=dtype),
+                i,
+            )
+        return cache
+
+    def generate(self, input_ids=None, attention_mask=None, **kwargs):
+        if 'control_id' in kwargs:
+            prefix_len = self.config.n_prefix_token
+            if attention_mask is not None:
+                prefix_mask = attention_mask.new_ones(attention_mask.shape[0], prefix_len)
+                attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+            else:
+                attention_mask = input_ids.new_ones(input_ids.shape[0], prefix_len + input_ids.shape[1])
+        return super().generate(input_ids, attention_mask=attention_mask, **kwargs)
+
+    def prepare_inputs_for_generation(self, input_ids, past_key_values=None, attention_mask=None, **kwargs):
+        is_first_step = past_key_values is None or past_key_values.get_seq_length() == 0
+        if is_first_step and 'control_id' in kwargs:
+            control_ids = [kwargs['control_id']] * input_ids.shape[0]
+            past_key_values = self.get_past_from_prefix(control_ids)
+            prefix_len = past_key_values.get_seq_length()
+            if attention_mask is not None and attention_mask.shape[1] == input_ids.shape[1]:
+                prefix_mask = attention_mask.new_ones(attention_mask.shape[0], prefix_len)
+                attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
+            elif attention_mask is None:
+                attention_mask = input_ids.new_ones(input_ids.shape[0], prefix_len + input_ids.shape[1])
+        return super().prepare_inputs_for_generation(
+            input_ids, past_key_values=past_key_values, attention_mask=attention_mask, **kwargs
+        )
+
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values=None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        control_id=None,  # placeholder, unused in forward
+    ):
+        return super().forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            labels=labels,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+
 def model_from_pretrained(lm_path, model_type, config):
     kwargs = dict()
     if lm_path.startswith('Salesforce/codegen-'):
@@ -383,6 +813,47 @@ def model_from_pretrained(lm_path, model_type, config):
             model_class = MistralPrefixCausalLM
         else:
             assert False
+    elif lm_path.startswith('google/gemma-'):
+        kwargs['torch_dtype'] = torch.bfloat16
+        if model_type == 'lm':
+            model_class = GemmaForCausalLM
+        elif model_type == 'prefix':
+            model_class = GemmaPrefixCausalLM
+        else:
+            assert False
+    elif (lm_path.startswith('ByteDance-Seed/') or lm_path.startswith('codellama/')
+          or lm_path.startswith('deepseek-ai/') or lm_path.startswith('meta-llama/')):
+        kwargs['torch_dtype'] = torch.bfloat16
+        if model_type == 'lm':
+            model_class = LlamaForCausalLM
+        elif model_type == 'prefix':
+            model_class = LlamaPrefixCausalLM
+        else:
+            assert False
+    elif lm_path == 'microsoft/phi-2':
+        kwargs['torch_dtype'] = torch.bfloat16
+        if model_type == 'lm':
+            model_class = PhiForCausalLM
+        elif model_type == 'prefix':
+            model_class = PhiPrefixCausalLM
+        else:
+            assert False
+    elif lm_path.startswith('Qwen/Qwen2.5-Coder-'):
+        kwargs['torch_dtype'] = torch.bfloat16
+        if model_type == 'lm':
+            model_class = Qwen2ForCausalLM
+        elif model_type == 'prefix':
+            model_class = Qwen2PrefixCausalLM
+        else:
+            assert False
+    elif lm_path.startswith('Qwen/Qwen3-'):
+        kwargs['torch_dtype'] = torch.bfloat16
+        if model_type == 'lm':
+            model_class = Qwen3ForCausalLM
+        elif model_type == 'prefix':
+            model_class = Qwen3PrefixCausalLM
+        else:
+            assert False
     else:
         assert False
 
@@ -400,8 +871,14 @@ def config_from_pretrained(lm_path, path):
         return AutoConfig.from_pretrained(path)
 
 def save_model(model, path, args):
-    if type(model) in (CodeGenPrefixCausalLM, IncoderPrefixLM, SantaPrefixLM, MistralPrefixCausalLM):
-        assert args.pretrain_dir.startswith('Salesforce/codegen-') or args.pretrain_dir.startswith('facebook/incoder-') or args.pretrain_dir == 'bigcode/santacoder' or args.pretrain_dir.startswith('mistralai/')
+    if type(model) in (CodeGenPrefixCausalLM, IncoderPrefixLM, SantaPrefixLM, MistralPrefixCausalLM, GemmaPrefixCausalLM, LlamaPrefixCausalLM, PhiPrefixCausalLM, Qwen2PrefixCausalLM, Qwen3PrefixCausalLM):
+        assert (args.pretrain_dir.startswith('Salesforce/codegen-') or args.pretrain_dir.startswith('facebook/incoder-')
+                or args.pretrain_dir == 'bigcode/santacoder' or args.pretrain_dir.startswith('mistralai/')
+                or args.pretrain_dir.startswith('google/gemma-')
+                or args.pretrain_dir.startswith('ByteDance-Seed/') or args.pretrain_dir.startswith('codellama/')
+                or args.pretrain_dir.startswith('deepseek-ai/') or args.pretrain_dir.startswith('meta-llama/')
+                or args.pretrain_dir == 'microsoft/phi-2'
+                or args.pretrain_dir.startswith('Qwen/'))
         config_file = os.path.join(path)
         model.config.save_pretrained(config_file)
         prefix_file = os.path.join(path, 'pytorch_model.bin')

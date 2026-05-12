@@ -166,7 +166,9 @@ def get_logits_from_lm(lm, inputs, control_ids):
     else:
         past = None
     outputs = lm(inputs, past_key_values=past)
-    shift_logits = outputs.logits[..., :-1, :]
+    # Cast to float32 before softmax/log ops: bfloat16 underflows rare-token
+    # probabilities to 0.0, causing log(0)=-inf and 0*inf=NaN in KL/contrastive losses.
+    shift_logits = outputs.logits[..., :-1, :].float()
     shift_labels = inputs[..., 1:].unsqueeze(-1)
     shift_probs = F.softmax(shift_logits, dim=-1)
     return shift_logits.squeeze(0), torch.gather(shift_probs, 2, shift_labels).squeeze(-1).squeeze(0)
@@ -185,6 +187,8 @@ def token_weighted_loss(loss_type, inputs, targets, weights):
     if loss_type == 'kl':
         loss = loss.sum(dim=1)
     loss = loss[weights != 0]
+    if loss.numel() == 0:
+        return inputs.sum() * 0.0
     return loss.mean()
 
 class PrefixTrainer(TrainerBase):
@@ -248,6 +252,8 @@ class PrefixTrainer(TrainerBase):
 
         loss = lm_loss + contrastive_loss + kl_loss
         return_dict['loss'] = loss.item()
+        if not torch.isfinite(loss):
+            raise FloatingPointError(f'Non-finite prefix training loss: {return_dict}')
         return loss, return_dict
 
 class TextPromptTrainer(TrainerBase):

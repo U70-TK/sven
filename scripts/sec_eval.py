@@ -76,10 +76,12 @@ def codeql_create_db(info, out_src_dir, out_db_dir):
         raise RuntimeError(f'codeql_create_db failed:\n{r.stderr.decode()}')
 
 def _sven_additional_packs():
-    # CodeQL v2.11.1 doesn't follow symlinks when scanning for packs.
-    # Pass the exact version directories as a colon-separated list so
-    # only one version of each pack is visible (avoids "found in 2 locations" error).
-    base = os.path.expanduser('~/.codeql/packages/codeql')
+    # Packs are stored in <project_root>/codeql/packages (set up by setup_codeql.sh
+    # with --dir=codeql/packages) so multiple cluster instances don't share ~/.codeql.
+    # CodeQL v2.11.1 doesn't follow symlinks when scanning for packs, so pass the
+    # exact version directories as a colon-separated list to avoid "found in 2 locations" errors.
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    base = os.path.join(script_dir, '..', 'codeql', 'packages', 'codeql')
     packs = [
         ('cpp-all',    '0.7.1'),
         ('python-all', '0.6.2'),

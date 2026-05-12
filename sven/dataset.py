@@ -70,19 +70,45 @@ class PrefixDataset(DatasetBase):
         if len(tokens) > self.args.max_num_tokens: return None
 
         min_changed_tokens = (2 if self.args.vul_type in ('cwe-invalid', 'cwe-valid') else 1)
-        if changes is None:
+        if changes is None or len(changes) == 0:
+            # No change info available: treat whole sequence as changed (prog-level)
             weights = [1] * len(tokens)
         else:
             weights = [0] * len(tokens)
             for change in changes:
                 char_start = change['char_start']
-                char_start_idx = be.char_to_token(char_start)
                 char_end = change['char_end']
-                char_end_idx = be.char_to_token(char_end-1)
-                for char_idx in range(char_start_idx, char_end_idx+1):
+                char_start_idx = be.char_to_token(char_start)
+                if char_start_idx is None:
+                    # Scan forward first: whitespace chars map to the *next* token
+                    for off in range(1, 50):
+                        if char_start + off < len(src):
+                            char_start_idx = be.char_to_token(char_start + off)
+                            if char_start_idx is not None:
+                                break
+                    if char_start_idx is None:
+                        for off in range(1, 50):
+                            if char_start - off >= 0:
+                                char_start_idx = be.char_to_token(char_start - off)
+                                if char_start_idx is not None:
+                                    break
+                char_end_idx = be.char_to_token(char_end - 1)
+                if char_end_idx is None:
+                    for off in range(1, 50):
+                        if char_end - 1 - off >= 0:
+                            char_end_idx = be.char_to_token(char_end - 1 - off)
+                            if char_end_idx is not None:
+                                break
+                if char_start_idx is None or char_end_idx is None or char_start_idx > char_end_idx:
+                    continue
+                for char_idx in range(char_start_idx, char_end_idx + 1):
                     weights[char_idx] = 1
-            if sum(weights) < min_changed_tokens: return None
-            if len(tokens) - sum(weights) < min_changed_tokens: return None
+            if sum(weights) < min_changed_tokens:
+                # char_to_token failed for all changes (broken offset mapping for some
+                # tokenizers, e.g. SentencePiece/Metaspace): fall back to prog-level
+                weights = [1] * len(tokens)
+            elif len(tokens) - sum(weights) < min_changed_tokens:
+                return None
 
         return tokens, weights, control_id, vul_id
 
@@ -105,20 +131,42 @@ class TextPromptDataset(DatasetBase):
         be = self.tokenizer(src)
         tokens = be.data['input_ids']
 
-        if changes is None:
+        if changes is None or len(changes) == 0:
             labels = tokens[:]
         else:
             labels = [-100] * len(tokens)
             label_set = False
             for change in changes:
                 char_start = change['char_start'] + len(control)
-                char_start_idx = be.char_to_token(char_start)
                 char_end = change['char_end'] + len(control)
-                char_end_idx = be.char_to_token(char_end-1)
-                for i in range(char_start_idx, char_end_idx+1):
+                char_start_idx = be.char_to_token(char_start)
+                if char_start_idx is None:
+                    for off in range(1, 50):
+                        if char_start + off < len(src):
+                            char_start_idx = be.char_to_token(char_start + off)
+                            if char_start_idx is not None:
+                                break
+                    if char_start_idx is None:
+                        for off in range(1, 50):
+                            if char_start - off >= 0:
+                                char_start_idx = be.char_to_token(char_start - off)
+                                if char_start_idx is not None:
+                                    break
+                char_end_idx = be.char_to_token(char_end - 1)
+                if char_end_idx is None:
+                    for off in range(1, 50):
+                        if char_end - 1 - off >= 0:
+                            char_end_idx = be.char_to_token(char_end - 1 - off)
+                            if char_end_idx is not None:
+                                break
+                if char_start_idx is None or char_end_idx is None or char_start_idx > char_end_idx:
+                    continue
+                for i in range(char_start_idx, char_end_idx + 1):
                     labels[i] = tokens[i]
                     label_set = True
-            if not label_set: return None
+            if not label_set:
+                # char_to_token failed for all changes: fall back to prog-level
+                labels = tokens[:]
 
         if len(tokens) > self.args.max_num_tokens: return None
         return tokens, labels

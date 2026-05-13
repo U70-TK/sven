@@ -1,9 +1,35 @@
 import os
 import torch
 from typing import Optional, Tuple, Union, List
-from transformers import AutoTokenizer, AutoConfig, logging, GemmaForCausalLM, LlamaForCausalLM, MistralForCausalLM, PhiForCausalLM, Qwen2ForCausalLM, Qwen3ForCausalLM
+from transformers import AutoTokenizer, AutoConfig, PreTrainedTokenizerFast, logging, GemmaForCausalLM, LlamaForCausalLM, MistralForCausalLM, PhiForCausalLM, Qwen2ForCausalLM, Qwen3ForCausalLM
 from transformers.modeling_outputs import CausalLMOutputWithPast, CausalLMOutputWithCrossAttentions
+from huggingface_hub import hf_hub_download
 from sven.hf import CodeGenForCausalLM, XGLMForCausalLM, GPT2LMHeadCustomModel, GPT2CustomConfig
+
+
+def _load_tokenizer(path):
+    # AutoTokenizer mis-resolves deepseek-ai/deepseek-coder-* as LlamaTokenizer,
+    # which drops the byte-BPE Ġ/Ċ markers and emits a different (wrong) id set
+    # than the model was pretrained on. Detect deepseek-coder and load the raw
+    # tokenizer.json from HF via PreTrainedTokenizerFast instead.
+    hf_id = None
+    if os.path.isdir(path):
+        lm_path_file = os.path.join(path, 'lm.txt')
+        if os.path.exists(lm_path_file):
+            with open(lm_path_file) as f:
+                hf_id = f.read().strip()
+    else:
+        hf_id = path
+
+    if hf_id and 'deepseek-ai/' in hf_id.lower() and 'deepseek-coder' in hf_id.lower():
+        tokenizer_file = hf_hub_download(hf_id, 'tokenizer.json')
+        return PreTrainedTokenizerFast(
+            tokenizer_file=tokenizer_file,
+            bos_token='<｜begin▁of▁sentence｜>',
+            eos_token='<｜end▁of▁sentence｜>',
+            pad_token='<｜end▁of▁sentence｜>',
+        )
+    return AutoTokenizer.from_pretrained(path)
 
 class CodeGenPrefixCausalLM(CodeGenForCausalLM):
     def __init__(self, config):
@@ -894,7 +920,7 @@ def save_model(model, path, args):
 
 def load_model(model_type, path, is_training, args):
     logging.set_verbosity_error()
-    tokenizer = AutoTokenizer.from_pretrained(path)
+    tokenizer = _load_tokenizer(path)
     if tokenizer.eos_token_id is None:
         tokenizer.eos_token_id = tokenizer.bos_token_id
     if tokenizer.pad_token_id is None:

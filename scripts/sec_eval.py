@@ -10,7 +10,6 @@ from libcst.metadata import PositionProvider
 from libcst._position import CodePosition
 from collections import OrderedDict
 
-from sven.evaler import LMEvaler, PrefixEvaler, TextPromptEvaler
 from sven.utils import set_seed, set_logging, set_devices
 from sven.constant import BINARY_LABELS, MODEL_DIRS, CWES_DICT
 
@@ -48,6 +47,9 @@ def get_args():
     return args
 
 def get_evaler(args):
+    # Lazy-import: pulls in transformers/torch, which the --codeql_only path
+    # doesn't need. Keeps codeql_env (Py3.8, libcst-only) viable.
+    from sven.evaler import LMEvaler, PrefixEvaler, TextPromptEvaler
     if args.model_type == 'lm':
         evaler = LMEvaler(args)
         controls = ['orig']

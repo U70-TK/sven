@@ -1,0 +1,9 @@
+
+Traceback (most recent call last):
+  File "sec_eval.py", line 13, in <module>
+    from sven.evaler import LMEvaler, PrefixEvaler, TextPromptEvaler
+  File "/u901/t577wang/sven/sven/evaler.py", line 7, in <module>
+    from sven.model import CodeGenPrefixCausalLM, load_model
+  File "/u901/t577wang/sven/sven/model.py", line 4, in <module>
+    from transformers import AutoTokenizer, AutoConfig, PreTrainedTokenizerFast, logging, GemmaForCausalLM, LlamaForCausalLM, MistralForCausalLM, PhiForCausalLM, Qwen2ForCausalLM, Qwen3ForCausalLM
+ModuleNotFoundError: No module named 'transformers'

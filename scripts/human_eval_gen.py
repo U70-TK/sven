@@ -114,11 +114,32 @@ def main():
                     use_cache=True,
                     **kwargs
                 )
+            # Decode the FULL sequence and slice off the prompt string,
+            # rather than decoding only the suffix. Decoding only the suffix
+            # drops SentencePiece's `▁`-prefix marker on the first generated
+            # token, eating one leading space at the prompt/completion
+            # boundary — breaks Python indentation for llama/codellama/mistral.
+            prompt_decoded = tokenizer.decode(
+                inputs['input_ids'][0].tolist(),
+                skip_special_tokens=True, clean_up_tokenization_spaces=False,
+            )
             for sample in samples.tolist():
-                completion = sample[inputs['input_ids'].shape[1]:]
-                if tokenizer.eos_token_id in completion:
-                    completion = completion[:completion.index(tokenizer.eos_token_id)]
-                completion = tokenizer.decode(completion)
+                if tokenizer.eos_token_id in sample:
+                    sample = sample[:sample.index(tokenizer.eos_token_id)]
+                full_decoded = tokenizer.decode(
+                    sample,
+                    skip_special_tokens=True, clean_up_tokenization_spaces=False,
+                )
+                if full_decoded.startswith(prompt_decoded):
+                    completion = full_decoded[len(prompt_decoded):]
+                else:
+                    # Fallback for tokenizers that re-normalize the prompt on
+                    # round-trip; preserves the old (buggy) behavior in that case.
+                    suffix_ids = sample[inputs['input_ids'].shape[1]:]
+                    completion = tokenizer.decode(
+                        suffix_ids,
+                        skip_special_tokens=True, clean_up_tokenization_spaces=False,
+                    )
                 completion = trim_code(completion, problem.stop_tokens)
                 problem.completions.append(completion)
             args.seed += 1

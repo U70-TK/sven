@@ -19,11 +19,14 @@ nvidia-smi --query-gpu=index,name,memory.used --format=csv
 source "${SVEN_ROOT}/.venv/bin/activate"
 cd "${SVEN_ROOT}/scripts"
 
+# GPU 5 is in use by someone else; use 0,1,2,3,4,6.
+GPUS=(0 1 2 3 4 6)
 PIDS=()
-GPU=0
+i=0
 for m in codellama-7b llama2-7b mistral-7b; do
     CKPT="${SVEN_ROOT}/trained/${m}-prefix/checkpoint-last"
     for ctrl in sec vul; do
+        GPU="${GPUS[$i]}"
         OUT="human-eval-${m}-prefix-${ctrl}"
         LOG="${LOG_DIR}/${OUT}.log"
         (
@@ -41,7 +44,7 @@ for m in codellama-7b llama2-7b mistral-7b; do
         pid=$!
         PIDS+=("${pid}")
         echo "spawned ${OUT} on GPU ${GPU} (pid=${pid}) -> ${LOG}"
-        GPU=$((GPU+1))
+        i=$((i+1))
     done
 done
 

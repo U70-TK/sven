@@ -54,8 +54,24 @@ class EvalerBase:
         return completion
 
     def process_completions(self, input_src, input_ids_len, gen_output, lang):
-        tokens = gen_output[:, input_ids_len:, ...]
-        completions = self.tokenizer.batch_decode(tokens)
+        # Decode the FULL sequence and slice off the prompt by string length.
+        # Decoding only the suffix (`gen_output[:, input_ids_len:]`) drops the
+        # SentencePiece `▁`-prefix marker of the first generated token, which
+        # eats one leading space at the prompt/completion boundary — fatal for
+        # Python indent (3-space `for` instead of 4 -> IndentationError).
+        # Affects llama2 / codellama / mistral; byte-BPE tokenizers (phi-2,
+        # deepseek-coder via patched loader, qwen2.5-coder, qwen3) are fine
+        # either way, so this path is correct for all 10 models.
+        full_decoded = self.tokenizer.batch_decode(gen_output, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+        prompt_decoded = self.tokenizer.decode(gen_output[0][:input_ids_len], skip_special_tokens=True, clean_up_tokenization_spaces=False)
+        completions = []
+        for full in full_decoded:
+            if full.startswith(prompt_decoded):
+                completions.append(full[len(prompt_decoded):])
+            else:
+                # Tokenizer normalized something; fall back to suffix-only decode.
+                idx = full_decoded.index(full)
+                completions.append(self.tokenizer.decode(gen_output[idx][input_ids_len:], skip_special_tokens=True, clean_up_tokenization_spaces=False))
 
         output_srcs, output_ids = [], []
         dup_srcs, non_parsed_srcs = [], []
